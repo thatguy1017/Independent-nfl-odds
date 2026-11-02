@@ -149,6 +149,9 @@ with st.sidebar:
     selected_soccer = st.multiselect('Soccer competitions (1X2)', list(SOCCER.keys()), default=list(SOCCER.keys()))
     include_nba = st.checkbox('Include NBA', value=True)
     nba_markets = st.multiselect('NBA markets', ['h2h', 'spreads', 'totals'], default=['h2h', 'spreads', 'totals'], help='Moneyline, point spread, and over/under.')
+    st.subheader('Odds filter (decimal)')
+    min_odds = st.number_input('Minimum odds', min_value=1.01, max_value=1000.0, value=1.50, step=0.05, format='%.2f', help='Only show selections at or above this decimal price.')
+    max_odds = st.number_input('Maximum odds', min_value=1.01, max_value=1000.0, value=5.00, step=0.25, format='%.2f', help='Only show selections at or below this decimal price.')
     min_edge = st.number_input('Minimum market edge (percentage points)', min_value=-20.0, max_value=30.0, value=2.0, step=0.5)
     scan = st.button('Scan selected competitions', type='primary')
 
@@ -160,6 +163,8 @@ if scan:
         st.error('Enter your API key first.')
     elif not regions:
         st.error('Select at least one bookmaker region.')
+    elif max_odds < min_odds:
+        st.error('Maximum odds must be greater than or equal to minimum odds.')
     elif not selected_soccer and not include_nba:
         st.error('Select at least one competition.')
     else:
@@ -194,17 +199,22 @@ if scan:
             if not all_rows:
                 st.info('No odds rows were returned. Try fewer leagues, check regions, and confirm plan coverage.')
             else:
-                df = pd.DataFrame(all_rows).sort_values('market_based_estimated_EV_%', ascending=False)
-                st.subheader('All available odds comparisons')
-                st.dataframe(df, use_container_width=True, hide_index=True)
-                candidates = df[df['market_edge_pp'] >= min_edge]
-                st.subheader('Market-screening candidates')
-                if candidates.empty:
-                    st.write('No outcomes passed your threshold. Do not force a bet.')
+                df = pd.DataFrame(all_rows)
+                df = df[df['best_odds'].between(min_odds, max_odds, inclusive='both')].copy()
+                if df.empty:
+                    st.info(f'No selections found between decimal odds {min_odds:.2f} and {max_odds:.2f}. Try widening the odds range.')
                 else:
-                    st.dataframe(candidates, use_container_width=True, hide_index=True)
-                st.download_button('Export scan to CSV', df.to_csv(index=False).encode('utf-8'), file_name='multisport_odds_scan.csv', mime='text/csv')
-                st.caption('Scan generated UTC: ' + datetime.now(timezone.utc).isoformat(timespec='seconds'))
+                    df = df.sort_values('market_based_estimated_EV_%', ascending=False)
+                    st.subheader(f'Odds comparisons ({min_odds:.2f}–{max_odds:.2f})')
+                    st.dataframe(df, use_container_width=True, hide_index=True)
+                    candidates = df[df['market_edge_pp'] >= min_edge]
+                    st.subheader('Market-screening candidates')
+                    if candidates.empty:
+                        st.write('No outcomes passed your threshold. Do not force a bet.')
+                    else:
+                        st.dataframe(candidates, use_container_width=True, hide_index=True)
+                    st.download_button('Export scan to CSV', df.to_csv(index=False).encode('utf-8'), file_name='multisport_odds_scan.csv', mime='text/csv')
+                    st.caption('Scan generated UTC: ' + datetime.now(timezone.utc).isoformat(timespec='seconds'))
         except Exception as exc:
             st.error(str(exc))
 else:
