@@ -26,7 +26,7 @@ NBA = {'NBA': 'basketball_nba'}
 
 st.set_page_config(page_title='Multi-Sport Odds Scanner', layout='wide')
 st.title('Multi-Sport Odds Scanner')
-st.caption('Soccer 1X2 + NBA moneyline, spread and totals | Research and paper trading only')
+st.caption('Soccer match, team-goal, half-time and handicap markets + NBA moneyline, spread and totals | Research and paper trading only')
 
 @st.cache_data(ttl=300, show_spinner=False)
 def get_sports(api_key):
@@ -121,10 +121,32 @@ def scan_event(event, sport_title, markets):
         fair_p = sum(probs) / len(probs)
         odds = best['odds']
         ev = fair_p * odds - 1
-        market_label = {'h2h': 'Moneyline / 1X2', 'spreads': 'Point spread', 'totals': 'Over/Under'}.get(best['market'], best['market'])
-        line_text = '' if best['point'] is None else f" {best['point']:+g}" if best['market'] == 'spreads' else f" {best['point']:g}"
-        if best['market'] == 'totals':
+        market_names = {
+            'h2h': 'Match result / 1X2',
+            'h2h_3_way': '3-way match result',
+            'draw_no_bet': 'Draw no bet',
+            'double_chance': 'Double chance',
+            'spreads': 'Asian handicap / spread',
+            'alternate_spreads': 'Alternate Asian handicap / spread',
+            'totals': 'Full-match total goals',
+            'alternate_totals': 'Alternate total goals',
+            'team_totals': 'Team total goals',
+            'h2h_h1': '1st-half result',
+            'h2h_h2': '2nd-half result',
+            'spreads_h1': '1st-half Asian handicap / spread',
+            'spreads_h2': '2nd-half Asian handicap / spread',
+            'totals_h1': '1st-half total goals',
+            'totals_h2': '2nd-half total goals',
+            'team_totals_h1': '1st-half team total goals',
+            'team_totals_h2': '2nd-half team total goals',
+            'btts': 'Both teams to score',
+        }
+        market_label = market_names.get(best['market'], best['market'])
+        line_text = '' if best['point'] is None else (f" {best['point']:+g}" if 'spreads' in best['market'] else f" {best['point']:g}")
+        if best['market'] in ('totals', 'alternate_totals', 'totals_h1', 'totals_h2'):
             selection_label = f"{best['name']} {best['point']}"
+        elif best['market'] in ('team_totals', 'team_totals_h1', 'team_totals_h2'):
+            selection_label = f"{best['selection']} {best['name']} {best['point']}"
         else:
             selection_label = f"{best['selection']}{line_text}"
         rows.append({
@@ -146,16 +168,45 @@ def scan_event(event, sport_title, markets):
 with st.sidebar:
     api_key = st.text_input('The Odds API key', type='password', help='Entered here only; do not add it to GitHub.')
     regions = st.multiselect('Bookmaker regions', ['uk', 'eu', 'us', 'au'], default=['uk', 'eu'])
-    selected_soccer = st.multiselect('Soccer competitions (1X2)', list(SOCCER.keys()), default=list(SOCCER.keys()))
+    selected_soccer = st.multiselect('Soccer competitions', list(SOCCER.keys()), default=list(SOCCER.keys()))
+    soccer_market_options = {
+        'Match result (1X2)': 'h2h',
+        'Draw no bet': 'draw_no_bet',
+        'Asian handicap / spread': 'spreads',
+        'Full-match total goals': 'totals',
+        'Team total goals (over/under by team)': 'team_totals',
+        '1st-half result': 'h2h_h1',
+        '2nd-half result': 'h2h_h2',
+        '1st-half Asian handicap / spread': 'spreads_h1',
+        '2nd-half Asian handicap / spread': 'spreads_h2',
+        '1st-half total goals': 'totals_h1',
+        '2nd-half total goals': 'totals_h2',
+        '1st-half team total goals': 'team_totals_h1',
+        '2nd-half team total goals': 'team_totals_h2',
+        'Both teams to score': 'btts',
+        'Double chance': 'double_chance',
+    }
+    selected_soccer_market_labels = st.multiselect(
+        'Soccer markets',
+        list(soccer_market_options.keys()),
+        default=[
+            'Match result (1X2)', 'Draw no bet', 'Asian handicap / spread',
+            'Full-match total goals', 'Team total goals (over/under by team)',
+            '1st-half total goals', '2nd-half total goals',
+            '1st-half team total goals', '2nd-half team total goals'
+        ],
+        help='Availability depends on competition, bookmaker feed, and API plan. Team total goals are betting lines, not statistical xG.'
+    )
+    selected_soccer_markets = [soccer_market_options[label] for label in selected_soccer_market_labels]
     include_nba = st.checkbox('Include NBA', value=True)
     nba_markets = st.multiselect('NBA markets', ['h2h', 'spreads', 'totals'], default=['h2h', 'spreads', 'totals'], help='Moneyline, point spread, and over/under.')
     st.subheader('Odds filter (decimal)')
-    min_odds = st.number_input('Minimum odds', min_value=1.01, max_value=1000.0, value=1.50, step=0.05, format='%.2f', help='Only show selections at or above this decimal price.')
-    max_odds = st.number_input('Maximum odds', min_value=1.01, max_value=1000.0, value=5.00, step=0.25, format='%.2f', help='Only show selections at or below this decimal price.')
+    min_odds = st.number_input('Minimum odds', min_value=1.01, max_value=1000.0, value=1.01, step=0.05, format='%.2f', help='Only show selections at or above this decimal price.')
+    max_odds = st.number_input('Maximum odds', min_value=1.01, max_value=1000.0, value=10.00, step=0.25, format='%.2f', help='Only show selections at or below this decimal price.')
     min_edge = st.number_input('Minimum market edge (percentage points)', min_value=-20.0, max_value=30.0, value=2.0, step=0.5)
     scan = st.button('Scan selected competitions', type='primary')
 
-st.info('This version compares the best available price with a de-vigged average of bookmaker prices. That is useful for odds screening, but it is **not yet an independent probability model** and cannot prove a bet is profitable. We will add separately trained soccer and NBA models after the odds feed is verified.')
+st.info('This version compares the best available price with a de-vigged average of bookmaker prices. That is useful for odds screening, but it is **not yet an independent probability model** and cannot prove a bet is profitable. Soccer team-total markets are goal-line bets for each team, not statistical expected-goals (xG) forecasts.')
 st.warning('A full scan can use many API credits: one request per selected competition. Start with 2–3 leagues to check your plan and remaining quota. Bet365 may not be included in every region/competition feed.')
 
 if scan:
@@ -167,12 +218,14 @@ if scan:
         st.error('Maximum odds must be greater than or equal to minimum odds.')
     elif not selected_soccer and not include_nba:
         st.error('Select at least one competition.')
+    elif selected_soccer and not selected_soccer_markets and not include_nba:
+        st.error('Select at least one soccer market or enable NBA.')
     else:
         try:
             with st.spinner('Checking supported competitions...'):
                 sports, catalogue_remaining = get_sports(api_key)
             supported = {s.get('key'): s for s in sports if s.get('active', True)}
-            wanted = [(name, key, 'h2h') for name, key in SOCCER.items() if name in selected_soccer]
+            wanted = [(name, key, ','.join(selected_soccer_markets)) for name, key in SOCCER.items() if name in selected_soccer and selected_soccer_markets]
             if include_nba and nba_markets:
                 wanted.append(('NBA', NBA['NBA'], ','.join(nba_markets)))
             tasks = [(name, key, mk) for name, key, mk in wanted if key in supported]
