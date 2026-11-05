@@ -13,6 +13,7 @@ SOCCER = {
     'French Ligue 1': 'soccer_france_ligue_one',
     'UEFA Champions League': 'soccer_uefa_champs_league',
     'UEFA Europa League': 'soccer_uefa_europa_league',
+    'UEFA Conference League': 'soccer_uefa_europa_conference_league',
     'Dutch Eredivisie': 'soccer_netherlands_eredivisie',
     'Portuguese Primeira Liga': 'soccer_portugal_primeira_liga',
     'English Championship': 'soccer_efl_champ',
@@ -35,6 +36,21 @@ def get_sports(api_key):
         raise RuntimeError(f'Sports catalogue request failed (HTTP {r.status_code}). Check the API key and plan.')
     return r.json(), r.headers.get('x-requests-remaining', 'unknown')
 
+def _raise_api_error(r, label):
+    # Show useful API error detail without exposing the request URL/API key.
+    try:
+        body = r.json()
+        detail = body.get('message') or body.get('error') or body.get('detail') or ''
+    except Exception:
+        detail = ''
+    if r.status_code == 401:
+        raise RuntimeError('API key rejected (HTTP 401). Check the key.')
+    if r.status_code == 403:
+        raise RuntimeError('This sport/market may not be included in your API plan (HTTP 403). ' + str(detail))
+    if r.status_code == 429:
+        raise RuntimeError('API rate/credit limit reached (HTTP 429).')
+    raise RuntimeError(f'{label} failed (HTTP {r.status_code}). ' + str(detail))
+
 @st.cache_data(ttl=90, show_spinner=False)
 def get_odds(api_key, sport_key, regions, markets):
     r = requests.get(f'{BASE}/sports/{sport_key}/odds/', params={
@@ -42,15 +58,58 @@ def get_odds(api_key, sport_key, regions, markets):
         'oddsFormat': 'decimal', 'dateFormat': 'iso'
     }, timeout=30)
     if r.status_code >= 400:
-        # Do not expose the request URL, which contains the API key.
-        if r.status_code == 401:
-            raise RuntimeError('API key rejected (HTTP 401). Check the key.')
-        if r.status_code == 403:
-            raise RuntimeError('This sport/market may not be included in your API plan (HTTP 403).')
-        if r.status_code == 429:
-            raise RuntimeError('API rate/credit limit reached (HTTP 429).')
-        raise RuntimeError(f'Odds request failed (HTTP {r.status_code}) for {sport_key}.')
+        _raise_api_error(r, f'Odds request for {sport_key}')
     return r.json(), r.headers.get('x-requests-remaining', 'unknown')
+
+@st.cache_data(ttl=90, show_spinner=False)
+def get_event_odds(api_key, sport_key, event_id, regions, markets):
+    r = requests.get(f'{BASE}/sports/{sport_key}/events/{event_id}/odds/', params={
+        'apiKey': api_key, 'regions': regions, 'markets': markets,
+        'oddsFormat': 'decimal', 'dateFormat': 'iso'
+    }, timeout=30)
+    if r.status_code >= 400:
+        _raise_api_error(r, f'Additional market request for {sport_key}')
+    return r.json(), r.headers.get('x-requests-remaining', 'unknown')
+
+
+def _merge_event_markets(base_event, extra_event):
+    if not isinstance(extra_event, dict):
+        return
+    by_key = {b.get('key'): b for b in base_event.get('bookmakers', [])}
+    for extra_book in extra_event.get('bookmakers', []):
+        key = extra_book.get('key')
+        if key not in by_key:
+            base_event.setdefault('bookmakers', []).append(extra_book)
+            by_key[key] = extra_book
+        else:
+            existing = by_key[key].setdefault('markets', [])
+            known = {m.get('key') for m in existing}
+            existing.extend(m for m in extra_book.get('markets', []) if m.get('key') not in known)
+
+
+def add_extra_markets(api_key, sport_key, event, regions, extra_markets):
+    # Try all selected non-featured markets together first to limit API calls.
+    # If the API rejects the combination, retry individually so one unsupported
+    # market cannot block the rest.
+    if not extra_markets or not event.get('id'):
+        return event, 'unknown', []
+    errors = []
+    try:
+        data, remaining = get_event_odds(api_key, sport_key, event['id'], regions, ','.join(extra_markets))
+        extra_event = data[0] if isinstance(data, list) and data else data
+        _merge_event_markets(event, extra_event)
+        return event, remaining, errors
+    except Exception as exc:
+        errors.append(str(exc))
+    remaining = 'unknown'
+    for market in extra_markets:
+        try:
+            data, remaining = get_event_odds(api_key, sport_key, event['id'], regions, market)
+            extra_event = data[0] if isinstance(data, list) and data else data
+            _merge_event_markets(event, extra_event)
+        except Exception as exc:
+            errors.append(f'{market}: {exc}')
+    return event, remaining, errors
 
 def no_vig_probs(outcomes):
     valid = []
@@ -207,7 +266,7 @@ with st.sidebar:
     scan = st.button('Scan selected competitions', type='primary')
 
 st.info('This version compares the best available price with a de-vigged average of bookmaker prices. That is useful for odds screening, but it is **not yet an independent probability model** and cannot prove a bet is profitable. Soccer team-total markets are goal-line bets for each team, not statistical expected-goals (xG) forecasts.')
-st.warning('A full scan can use many API credits: one request per selected competition. Start with 2–3 leagues to check your plan and remaining quota. Bet365 may not be included in every region/competition feed.')
+st.warning('Extra soccer markets are fetched per match through the event-specific endpoint and can use significantly more API credits than standard markets. Start with one league and only the extra markets you need. Bet365 may not be included in every region/competition feed.')
 
 if scan:
     if not api_key:
@@ -225,11 +284,13 @@ if scan:
             with st.spinner('Checking supported competitions...'):
                 sports, catalogue_remaining = get_sports(api_key)
             supported = {s.get('key'): s for s in sports if s.get('active', True)}
-            wanted = [(name, key, ','.join(selected_soccer_markets)) for name, key in SOCCER.items() if name in selected_soccer and selected_soccer_markets]
+            featured_soccer = [m for m in selected_soccer_markets if m in ('h2h', 'spreads', 'totals')]
+            extra_soccer = [m for m in selected_soccer_markets if m not in ('h2h', 'spreads', 'totals')]
+            wanted = [(name, key, ','.join(featured_soccer), extra_soccer) for name, key in SOCCER.items() if name in selected_soccer and selected_soccer_markets]
             if include_nba and nba_markets:
-                wanted.append(('NBA', NBA['NBA'], ','.join(nba_markets)))
-            tasks = [(name, key, mk) for name, key, mk in wanted if key in supported]
-            unavailable = [(name, key) for name, key, _ in wanted if key not in supported]
+                wanted.append(('NBA', NBA['NBA'], ','.join(nba_markets), []))
+            tasks = [(name, key, mk, extras) for name, key, mk, extras in wanted if key in supported]
+            unavailable = [(name, key) for name, key, _, _ in wanted if key not in supported]
             if unavailable:
                 st.warning('Not listed as available by your API key/plan: ' + ', '.join(name for name, _ in unavailable))
             if not tasks:
@@ -238,11 +299,26 @@ if scan:
             progress = st.progress(0, text='Loading odds...')
             errors = []
             last_remaining = 'unknown'
-            for i, (name, key, markets) in enumerate(tasks, start=1):
+            for i, (name, key, markets, extra_markets) in enumerate(tasks, start=1):
                 try:
-                    events, last_remaining = get_odds(api_key, key, ','.join(regions), markets)
+                    # Featured markets use the standard odds endpoint; extra soccer
+                    # markets are fetched per event through the event-odds endpoint.
+                    if name != 'NBA' and not markets:
+                        events, last_remaining = get_odds(api_key, key, ','.join(regions), 'h2h')
+                        featured_for_scan = []
+                    else:
+                        events, last_remaining = get_odds(api_key, key, ','.join(regions), markets)
+                        featured_for_scan = markets.split(',') if markets else []
+                    if name != 'NBA' and extra_markets:
+                        for ev in events:
+                            ev, remaining, extra_errors = add_extra_markets(api_key, key, ev, ','.join(regions), extra_markets)
+                            if remaining != 'unknown':
+                                last_remaining = remaining
+                            for err in extra_errors:
+                                errors.append(f'{name} ({ev.get("away_team", "")} @ {ev.get("home_team", "")}): {err}')
+                    markets_for_scan = list(dict.fromkeys(featured_for_scan + extra_markets))
                     for ev in events:
-                        all_rows.extend(scan_event(ev, name, markets.split(',')))
+                        all_rows.extend(scan_event(ev, name, markets_for_scan))
                 except Exception as exc:
                     errors.append(f'{name}: {str(exc)}')
                 progress.progress(i / len(tasks), text=f'Scanned {i} of {len(tasks)} competitions')
